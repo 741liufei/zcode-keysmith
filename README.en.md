@@ -85,6 +85,17 @@ ZCODE_APP_PATH=/path/to/ZCode.app python3 zcode-keysmith.py install --dry-run
 
 See [`docs/reference.md`](docs/reference.md) for the project layout and `py_compile`/`pytest` verification steps.
 
+### Community
+
+This project accepts monitoring and feedback from the LINUX DO community: [LINUX DO](https://linux.do)
+
+Same series:
+
+- [codex-keysmith](https://github.com/Jia-Ethan/codex-keysmith) - Versioned instruction deployment for local Codex CLI configuration with preview, hook isolation, interruption recovery, and layered uninstall.
+- [claude-keysmith](https://github.com/Jia-Ethan/claude-keysmith) - Managed Claude Code `CLAUDE.md` import-block installer for local Markdown instruction files.
+- [grok-keysmith](https://github.com/Jia-Ethan/grok-keysmith) - Global `AGENTS.md` instruction deployment for Grok Build with compat/hook isolation, interruption recovery, and layered uninstall.
+- [zcode-keysmith](https://github.com/Jia-Ethan/zcode-keysmith) - Managed true system-role entrypoint for ZCode App; an agent-server wrapper routes `system-role.md` into the runtime `customSystemPrompt` system-message path.
+
 ---
 
-简体中文版: [`README.md`](README.md)。Agent install prompt and sibling projects: [`docs/agent-install.md`](docs/agent-install.md).
+简体中文版: [`README.md`](README.md)。Agent install prompt: [`docs/agent-install.md`](docs/agent-install.md).
