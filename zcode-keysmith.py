@@ -33,6 +33,7 @@ DEFAULT_SYSTEM_FILE_NAME = "system-role.md"
 DEFAULT_CONFIG_FILE_NAME = "config.json"
 DEFAULT_WRAPPER_NAME = "zcode-agent-wrapper.py"
 DEFAULT_ENV_SCRIPT_NAME = "zcode-keysmith-env.sh"
+DEFAULT_WINDOWS_ENV_SCRIPT_NAME = "zcode-keysmith-env.cmd"
 DEFAULT_LAUNCH_AGENT_LABEL = "com.jia.zcode-keysmith.env"
 DEFAULT_LAUNCH_AGENT_NAME = f"{DEFAULT_LAUNCH_AGENT_LABEL}.plist"
 DEFAULT_ZCODE_APP = Path("/Applications/ZCode.app")
@@ -40,6 +41,9 @@ DEFAULT_ZCODE_RUNTIME = DEFAULT_ZCODE_APP / "Contents" / "Resources" / "glm" / "
 DEFAULT_ZCODE_HELPER_NODE_COMMAND = DEFAULT_ZCODE_APP / "Contents" / "Frameworks" / "ZCode Helper.app" / "Contents" / "MacOS" / "ZCode Helper"
 DEFAULT_ZCODE_NODE_COMMAND = DEFAULT_ZCODE_HELPER_NODE_COMMAND
 FALLBACK_ZCODE_NODE_COMMAND = DEFAULT_ZCODE_APP / "Contents" / "MacOS" / "ZCode"
+DEFAULT_WINDOWS_ZCODE_APP = Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "ZCode"
+DEFAULT_WINDOWS_ZCODE_EXE = DEFAULT_WINDOWS_ZCODE_APP / "ZCode.exe"
+DEFAULT_WINDOWS_RUNTIME = DEFAULT_WINDOWS_ZCODE_APP / "resources" / "glm" / "zcode.cjs"
 DEFAULT_AGENT_ARGS_JSON = '["app-server","--stdio"]'
 PATCH_NEEDLE = "customSystemPrompt:this.config.systemPrompt,language:"
 
@@ -54,11 +58,13 @@ class InstallPaths:
     system_file: Path
     config_file: Path
     wrapper: Path
+    wrapper_script: Path
     env_script: Path
     launch_agent: Path
     log_dir: Path
     cache_dir: Path
     wrapper_log: Path
+    platform_name: str
 
 
 @dataclass(frozen=True)
@@ -78,24 +84,55 @@ def default_launch_agent_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / DEFAULT_LAUNCH_AGENT_NAME
 
 
+def default_windows_env_script_path(managed_dir: Path) -> Path:
+    return expand_path(managed_dir) / "bin" / DEFAULT_WINDOWS_ENV_SCRIPT_NAME
+
+
+def default_windows_registry_value_name() -> str:
+    return DEFAULT_LAUNCH_AGENT_LABEL
+
+
 def build_paths(managed_dir: Path, launch_agent: Path | None = None) -> InstallPaths:
     managed_dir = expand_path(managed_dir)
     bin_dir = managed_dir / "bin"
+    platform_name = platform.system()
+    if platform_name == "Windows":
+        env_script = bin_dir / DEFAULT_WINDOWS_ENV_SCRIPT_NAME
+        wrapper_script = bin_dir / DEFAULT_WRAPPER_NAME
+        wrapper = bin_dir / f"{Path(DEFAULT_WRAPPER_NAME).stem}.cmd"
+        launch_agent_path = expand_path(launch_agent) if launch_agent else managed_dir / f"{DEFAULT_LAUNCH_AGENT_LABEL}.reg"
+    else:
+        env_script = bin_dir / DEFAULT_ENV_SCRIPT_NAME
+        wrapper_script = bin_dir / DEFAULT_WRAPPER_NAME
+        wrapper = wrapper_script
+        launch_agent_path = expand_path(launch_agent) if launch_agent else default_launch_agent_path()
     return InstallPaths(
         managed_dir=managed_dir,
         system_file=managed_dir / DEFAULT_SYSTEM_FILE_NAME,
         config_file=managed_dir / DEFAULT_CONFIG_FILE_NAME,
-        wrapper=bin_dir / DEFAULT_WRAPPER_NAME,
-        env_script=bin_dir / DEFAULT_ENV_SCRIPT_NAME,
-        launch_agent=expand_path(launch_agent) if launch_agent else default_launch_agent_path(),
+        wrapper=wrapper,
+        wrapper_script=wrapper_script,
+        env_script=env_script,
+        launch_agent=launch_agent_path,
         log_dir=managed_dir / "logs",
         cache_dir=managed_dir / "cache",
         wrapper_log=managed_dir / "logs" / "wrapper-start.jsonl",
+        platform_name=platform_name,
     )
 
 
 def resolve_zcode_bundle_paths(zcode_app: Path) -> tuple[Path, Path]:
     app = expand_path(zcode_app)
+    if app.is_file() and app.suffix.lower() == ".exe":
+        app = app.parent
+    if platform.system() == "Windows":
+        runtime_candidates = [
+            app / "resources" / "glm" / "zcode.cjs",
+            app / "resources" / "app" / "glm" / "zcode.cjs",
+        ]
+        runtime = next((candidate for candidate in runtime_candidates if candidate.exists()), runtime_candidates[0])
+        main_node = app / "ZCode.exe"
+        return runtime.resolve(), main_node.resolve()
     runtime = app / "Contents" / "Resources" / "glm" / "zcode.cjs"
     helper_node = app / "Contents" / "Frameworks" / "ZCode Helper.app" / "Contents" / "MacOS" / "ZCode Helper"
     main_node = app / "Contents" / "MacOS" / "ZCode"
@@ -123,6 +160,8 @@ def discover_zcode_app_path() -> Path:
         expanded = candidate.expanduser()
         if expanded.exists() and expanded.is_dir():
             return expanded.resolve()
+    if platform.system() == "Windows":
+        return DEFAULT_WINDOWS_ZCODE_APP.resolve()
     return DEFAULT_ZCODE_APP.resolve()
 
 
@@ -136,7 +175,10 @@ def zcode_app_from_runtime(runtime_path: Path) -> Path | None:
 def app_supports_agent_server_override(zcode_app: Path | None) -> bool:
     if not zcode_app:
         return False
-    app_asar = zcode_app / "Contents" / "Resources" / "app.asar"
+    if platform.system() == "Windows":
+        app_asar = zcode_app / "resources" / "app.asar"
+    else:
+        app_asar = zcode_app / "Contents" / "Resources" / "app.asar"
     if not app_asar.exists() or not app_asar.is_file():
         return False
     try:
@@ -146,10 +188,18 @@ def app_supports_agent_server_override(zcode_app: Path | None) -> bool:
 
 
 def is_zcode_running() -> bool:
-    if platform.system() != "Darwin":
-        return False
-    completed = subprocess.run(["pgrep", "-x", "ZCode"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    return completed.returncode == 0
+    if platform.system() == "Darwin":
+        completed = subprocess.run(["pgrep", "-x", "ZCode"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        return completed.returncode == 0
+    if platform.system() == "Windows":
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", "Get-Process ZCode -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { exit 0 }; exit 1"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return completed.returncode == 0
+    return False
 
 
 def normalize_system_prompt_content(content: str) -> str:
@@ -284,6 +334,13 @@ def env_values(plan: InstallPlan) -> dict[str, str]:
 
 
 def render_env_script(plan: InstallPlan) -> str:
+    if plan.paths.platform_name == "Windows":
+        lines = ["@echo off", "setlocal"]
+        for key, value in env_values(plan).items():
+            lines.append(f'set "{key}={value}"')
+        lines.append('echo zcode-keysmith Windows 环境脚本已生成。')
+        lines.append('endlocal')
+        return "\r\n".join(lines) + "\r\n"
     lines = ["#!/bin/sh", "set -eu"]
     for key, value in env_values(plan).items():
         lines.append(f"launchctl setenv {key} {sh_single_quote(value)}")
@@ -296,6 +353,8 @@ def sh_single_quote(value: str) -> str:
 
 
 def render_launch_agent(plan: InstallPlan) -> dict[str, object]:
+    if plan.paths.platform_name == "Windows":
+        raise KeysmithError("Windows 平台不生成 LaunchAgent plist")
     return {
         "Label": DEFAULT_LAUNCH_AGENT_LABEL,
         "ProgramArguments": [str(plan.paths.env_script)],
@@ -310,6 +369,7 @@ def render_config(plan: InstallPlan) -> str:
         "mode": "zcode-app-wrapper",
         "system_file": str(plan.paths.system_file),
         "wrapper": str(plan.paths.wrapper),
+        "wrapper_script": str(plan.paths.wrapper_script),
         "env_script": str(plan.paths.env_script),
         "launch_agent": str(plan.paths.launch_agent),
         "zcode_runtime": str(plan.zcode_runtime),
@@ -318,8 +378,19 @@ def render_config(plan: InstallPlan) -> str:
         "wrapper_log": str(plan.paths.wrapper_log),
         "agent_server_args_json": DEFAULT_AGENT_ARGS_JSON,
         "app_bundle_modified": False,
+        "platform": plan.paths.platform_name,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+def render_windows_env_registry(plan: InstallPlan) -> str:
+    lines = ["Windows Registry Editor Version 5.00", ""]
+    for key, value in env_values(plan).items():
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(rf'[HKEY_CURRENT_USER\Environment]')
+        lines.append(rf'"{key}"="{escaped}"')
+        lines.append("")
+    return "\r\n".join(lines)
 
 
 def render_wrapper(plan: InstallPlan) -> str:
@@ -399,6 +470,10 @@ def main() -> int:
     log_invocation(runtime, args)
     env = os.environ.copy()
     env["ELECTRON_RUN_AS_NODE"] = "1"
+    if os.name == "nt":
+        import subprocess
+        completed = subprocess.run([NODE_COMMAND, str(runtime), *args], env=env, check=False)
+        return completed.returncode
     os.execve(NODE_COMMAND, [NODE_COMMAND, str(runtime), *args], env)
     return 127
 
@@ -408,7 +483,34 @@ if __name__ == "__main__":
 '''
 
 
+def render_windows_wrapper_launcher(plan: InstallPlan) -> str:
+    wrapper_script = str(plan.paths.wrapper_script)
+    python_exe = json.dumps(sys.executable, ensure_ascii=False)
+    return (
+        "@echo off\r\n"
+        "setlocal\r\n"
+        f'set "ZCODE_KEYSMITH_WRAPPER_SCRIPT={wrapper_script}"\r\n'
+        f'set "ZCODE_KEYSMITH_PYTHON_EXE={json.loads(python_exe)}"\r\n'
+        "if not exist \"%ZCODE_KEYSMITH_WRAPPER_SCRIPT%\" (\r\n"
+        "  echo zcode-keysmith: 找不到包装脚本 %ZCODE_KEYSMITH_WRAPPER_SCRIPT%\r\n"
+        "  exit /b 1\r\n"
+        ")\r\n"
+        "\"%ZCODE_KEYSMITH_PYTHON_EXE%\" \"%ZCODE_KEYSMITH_WRAPPER_SCRIPT%\" %*\r\n"
+        "exit /b %errorlevel%\r\n"
+    )
+
+
 def activate_current_session(plan: InstallPlan) -> list[str]:
+    if platform.system() == "Windows":
+        results: list[str] = []
+        for key, value in env_values(plan).items():
+            os.environ[key] = value
+            results.append(f"setenv {key}: ok")
+        try:
+            subprocess.run(["setx", "ZCODE_KEYSMITH_ACTIVE", "1"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        except OSError:
+            pass
+        return results + ["windows_activation: current process env updated; open a new shell or restart ZCode to inherit"]
     if platform.system() != "Darwin":
         return ["launchctl: skipped (non-macOS)"]
     results: list[str] = []
@@ -518,17 +620,25 @@ def install(plan: InstallPlan, yes: bool, dry_run_flag: bool) -> list[str]:
     write_targets = [
         plan.paths.system_file,
         plan.paths.config_file,
-        plan.paths.wrapper,
+        plan.paths.wrapper_script,
         plan.paths.env_script,
-        plan.paths.launch_agent,
     ]
+    if plan.paths.wrapper != plan.paths.wrapper_script:
+        write_targets.append(plan.paths.wrapper)
+    if plan.paths.platform_name != "Windows":
+        write_targets.append(plan.paths.launch_agent)
     backups = [backup for target in write_targets if (backup := backup_existing(target))]
 
     atomic_write_text(plan.paths.system_file, system_prompt)
     atomic_write_text(plan.paths.config_file, render_config(plan))
-    atomic_write_text(plan.paths.wrapper, render_wrapper(plan), mode=0o755)
+    atomic_write_text(plan.paths.wrapper_script, render_wrapper(plan), mode=0o755)
+    if plan.paths.wrapper != plan.paths.wrapper_script:
+        atomic_write_text(plan.paths.wrapper, render_windows_wrapper_launcher(plan))
     atomic_write_text(plan.paths.env_script, render_env_script(plan), mode=0o755)
-    atomic_write_plist(plan.paths.launch_agent, render_launch_agent(plan))
+    if plan.paths.platform_name == "Windows":
+        atomic_write_text(plan.paths.launch_agent, render_windows_env_registry(plan))
+    else:
+        atomic_write_plist(plan.paths.launch_agent, render_launch_agent(plan))
 
     activation = activate_current_session(plan) if plan.activate else []
     return install_lines(plan, dry_run=False, backups=backups, activation=activation)
@@ -582,6 +692,7 @@ def doctor_lines(paths: InstallPaths, zcode_runtime: Path, node_command: Path) -
         f"node_command_exists: {str(node_command.exists()).lower()}",
         "app_bundle_modified: false",
         "api_key: not read or stored",
+        f"platform: {paths.platform_name}",
     ]
     for key, expected in expected_env.items():
         current = os.environ.get(key)
@@ -616,8 +727,11 @@ def read_last_wrapper_invocation(paths: InstallPaths) -> dict[str, object] | Non
 def run_wrapper_smoke(paths: InstallPaths, timeout: float = 10.0) -> tuple[bool, str]:
     if not paths.wrapper.exists():
         return False, "wrapper missing"
+    command = [str(paths.wrapper), "--help"]
+    if platform.system() == "Windows" and paths.wrapper.suffix.lower() == ".cmd":
+        command = ["cmd", "/c", str(paths.wrapper), "--help"]
     completed = subprocess.run(
-        [str(paths.wrapper), "--help"],
+        command,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -677,6 +791,20 @@ def uninstall_lines(paths: InstallPaths, dry_run: bool, removed: list[Path], act
 
 
 def unset_current_session_env() -> list[str]:
+    if platform.system() == "Windows":
+        results = []
+        for key in [
+            "ZCODE_AGENT_SERVER_COMMAND",
+            "ZCODE_AGENT_SERVER_ARGS_JSON",
+            "ZCODE_KEYSMITH_SYSTEM_FILE",
+            "ZCODE_KEYSMITH_ORIGINAL",
+            "ZCODE_KEYSMITH_NODE_COMMAND",
+            "ZCODE_KEYSMITH_CACHE_DIR",
+            "ZCODE_KEYSMITH_LOG_DIR",
+        ]:
+            os.environ.pop(key, None)
+            results.append(f"unsetenv {key}: ok")
+        return results + ["windows_activation: current process env cleared; open a new shell or restart ZCode"]
     if platform.system() != "Darwin":
         return ["launchctl unsetenv: skipped (non-macOS)"]
     results = []
@@ -715,30 +843,37 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Install or inspect zcode-keysmith managed ZCode App system-role entrypoint.")
     sub = parser.add_subparsers(dest="command")
 
+    if platform.system() == "Windows":
+        default_zcode_runtime = str(DEFAULT_WINDOWS_RUNTIME)
+        default_node_command = str(DEFAULT_WINDOWS_ZCODE_EXE)
+    else:
+        default_zcode_runtime = str(DEFAULT_ZCODE_RUNTIME)
+        default_node_command = str(DEFAULT_ZCODE_NODE_COMMAND)
+
     install_parser = sub.add_parser("install", help="Install managed ZCode App wrapper and system-role file")
     install_parser.add_argument("--system-file", default=str(DEFAULT_SOURCE_SYSTEM_FILE), help="Source Markdown system prompt. Default: examples/system-role.md")
     install_parser.add_argument("--managed-dir", default=str(DEFAULT_MANAGED_DIR), help="Managed install directory. Default: ~/.zcode-keysmith")
-    install_parser.add_argument("--launch-agent", default=None, help="LaunchAgent plist path. Default: ~/Library/LaunchAgents/com.jia.zcode-keysmith.env.plist")
+    install_parser.add_argument("--launch-agent", default=None, help="LaunchAgent plist path on macOS, or registry export path on Windows")
     install_parser.add_argument("--zcode-app", default=None, help="ZCode.app path. When provided, runtime and node command are derived from this bundle")
-    install_parser.add_argument("--zcode-runtime", default=str(DEFAULT_ZCODE_RUNTIME), help="Bundled ZCode runtime file")
-    install_parser.add_argument("--node-command", default=str(DEFAULT_ZCODE_NODE_COMMAND), help="Command used to run the patched runtime")
+    install_parser.add_argument("--zcode-runtime", default=default_zcode_runtime, help="Bundled ZCode runtime file")
+    install_parser.add_argument("--node-command", default=default_node_command, help="Command used to run the patched runtime")
     install_parser.add_argument("--dry-run", action="store_true", help="Preview paths and checks without writing")
     install_parser.add_argument("--yes", action="store_true", help="Allow writing files. --dry-run wins if both are provided")
-    install_parser.add_argument("--no-activate", action="store_true", help="Write files without updating current launchctl environment")
+    install_parser.add_argument("--no-activate", action="store_true", help="Write files without updating current session environment")
 
     doctor_parser = sub.add_parser("doctor", help="Inspect managed install state")
     doctor_parser.add_argument("--managed-dir", default=str(DEFAULT_MANAGED_DIR))
     doctor_parser.add_argument("--launch-agent", default=None)
     doctor_parser.add_argument("--zcode-app", default=None)
-    doctor_parser.add_argument("--zcode-runtime", default=str(DEFAULT_ZCODE_RUNTIME))
-    doctor_parser.add_argument("--node-command", default=str(DEFAULT_ZCODE_NODE_COMMAND))
+    doctor_parser.add_argument("--zcode-runtime", default=default_zcode_runtime)
+    doctor_parser.add_argument("--node-command", default=default_node_command)
 
     verify_parser = sub.add_parser("verify", help="Run local wrapper/runtime verification without sending model requests")
     verify_parser.add_argument("--managed-dir", default=str(DEFAULT_MANAGED_DIR))
     verify_parser.add_argument("--launch-agent", default=None)
     verify_parser.add_argument("--zcode-app", default=None)
-    verify_parser.add_argument("--zcode-runtime", default=str(DEFAULT_ZCODE_RUNTIME))
-    verify_parser.add_argument("--node-command", default=str(DEFAULT_ZCODE_NODE_COMMAND))
+    verify_parser.add_argument("--zcode-runtime", default=default_zcode_runtime)
+    verify_parser.add_argument("--node-command", default=default_node_command)
     verify_parser.add_argument("--no-smoke", action="store_true", help="Skip local wrapper --help smoke test")
 
     uninstall_parser = sub.add_parser("uninstall", help="Back up managed files and unset current environment")
